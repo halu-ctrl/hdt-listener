@@ -102,11 +102,13 @@ HDT
     reply_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     if reply_text:
-        slack_post("chat.postMessage", {
+        print(f"[DEBUG] Sending reply to channel={channel_id} thread_ts={thread_ts}")
+        result = slack_post("chat.postMessage", {
             "channel": channel_id,
             "thread_ts": thread_ts,
             "text": reply_text
         })
+        print(f"[DEBUG] Slack response: {result}")
 
 def handle_mention(event, channel_id, thread_ts, sender_id, message_text):
     time.sleep(2)  # 等一下避免重複觸發
