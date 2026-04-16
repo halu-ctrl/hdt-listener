@@ -11,35 +11,39 @@ app = Flask(__name__)
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
-PERPLEXITY_SPACE_ID = os.environ.get("PERPLEXITY_SPACE_ID")
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY")
 
 HALU_USER_ID = "U0235EQ8M7G"
+KELLY_USER_ID = "U02L5GLTL1Y"
 
-def verify_slack_signature(request):
-    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-    if abs(time.time() - int(timestamp)) > 300:
-        return False
-    sig_basestring = f"v0:{timestamp}:{request.get_data(as_text=True)}"
-    my_signature = "v0=" + hmac.new(
-        SLACK_SIGNING_SECRET.encode(),
-        sig_basestring.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    slack_signature = request.headers.get("X-Slack-Signature", "")
-    return hmac.compare_digest(my_signature, slack_signature)
+processed_events = set()
+
+def slack_get(endpoint, params):
+    resp = requests.get(
+        f"https://slack.com/api/{endpoint}",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+        params=params
+    )
+    return resp.json()
+
+def slack_post(endpoint, data):
+    resp = requests.post(
+        f"https://slack.com/api/{endpoint}",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-Type": "application/json"},
+        json=data
+    )
+    return resp.json()
 
 def read_thread(channel_id, thread_ts):
-    resp = requests.get(
-        "https://slack.com/api/conversations.replies",
-        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-        params={"channel": channel_id, "ts": thread_ts, "limit": 100}
-    )
-    return resp.json().get("messages", [])
+    result = slack_get("conversations.replies", {"channel": channel_id, "ts": thread_ts, "limit": 100})
+    return result.get("messages", [])
 
 def should_reply(messages):
     halu_msgs = [m for m in messages if m.get("user") == HALU_USER_ID]
-    other_msgs = [m for m in messages if m.get("user") != HALU_USER_ID and not m.get("text", "").startswith("HDT")]
+    other_msgs = [m for m in messages
+                  if m.get("user") != HALU_USER_ID
+                  and not m.get("text", "").startswith("HDT")
+                  and not m.get("bot_id")]
 
     if not other_msgs:
         return False
@@ -49,41 +53,40 @@ def should_reply(messages):
 
     return last_other_ts > last_halu_ts
 
-def trigger_hdt(channel_id, thread_ts, sender_id, message_text):
-    """呼叫 Perplexity Computer API 觸發 HDT 回覆"""
-    if not PERPLEXITY_API_KEY:
-        return
+def call_perplexity_agent(channel_id, thread_ts, sender_id, message_text, thread_messages):
+    """用 Perplexity Sonar 模型起草回覆，直接用 Slack API 發送"""
+
+    # 整理 thread 脈絡
+    context = "\n".join([
+        f"[{m.get('user', 'unknown')}] {m.get('text', '')}"
+        for m in thread_messages[-10:]  # 最近 10 則
+    ])
 
     prompt = f"""你是 Halu Digital Twin（HDT），VITABOX® 與 Rill® 創辦人 Halu 的數位分身。
 
-有人在 Slack tag 了 Halu，請立即處理這則訊息並回覆。
+有人在 Slack tag 了 Halu，請起草一則回覆。
 
-訊息資訊：
-- Channel ID: {channel_id}
-- Thread TS: {thread_ts}
-- 發送者 UserID: {sender_id}
-- 訊息內容: {message_text}
+發送者 UserID: {sender_id}
+訊息內容: {message_text}
 
-請依照以下步驟處理：
-1. 用 slack_read_thread 讀取 channel_id={channel_id}, message_ts={thread_ts} 的完整 thread
-2. 判斷是否需要 HDT 回覆（last_other_ts > last_halu_ts）
-3. 若需要，查詢 BS/BSS/EOS Agent Index，起草並用 slack_send_message 回覆
+Thread 脈絡（最近幾則）:
+{context}
 
-Halu/HDT user_id: U0235EQ8M7G
-Kelly user_id: U02L5GLTL1Y
-BS Agent Index: https://www.notion.so/3382322c59b481d687a6f3aeda1d1bc2
-BSS Agent Index: https://www.notion.so/3382322c59b481dbb037d18aa1938939
-EOS Agent Index: https://www.notion.so/3402322c59b4814b8be8df8d5adda720
-
-回覆格式：
+請起草回覆，格式：
 HDT
-<@發送者UserID>
+<@{sender_id}>
 
 [回覆內容]
 
-規則：口語直接有溫度，用「我們」為主體，最多 2 個 emoji，不加「Sent using @Computer」"""
+規則：
+- 口語、直接、有溫度，讓人工作有趣
+- 用「我們」為主體
+- 避免「不是…而是…」「支持」「節奏」「接住」「撐得過」「話術」
+- 最多 2 個 emoji
+- 不加「Sent using @Computer」
+- 純知會型訊息：溫暖簡短 1-2 句即可
+- 合約/大額支出/人事決策：回「收到，我確認後回你。」"""
 
-    # 呼叫 Perplexity API
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
         "Content-Type": "application/json"
@@ -92,44 +95,58 @@ HDT
         "model": "sonar",
         "messages": [{"role": "user", "content": prompt}]
     }
-    requests.post("https://api.perplexity.ai/chat/completions", headers=headers, json=data)
 
-def handle_event_async(event, channel_id, thread_ts, sender_id, message_text):
-    time.sleep(1)  # 避免重複觸發
+    resp = requests.post("https://api.perplexity.ai/chat/completions", headers=headers, json=data)
+    result = resp.json()
 
-    # 讀完整 thread 判斷是否需要回覆
+    reply_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    if reply_text:
+        slack_post("chat.postMessage", {
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+            "text": reply_text
+        })
+
+def handle_mention(event, channel_id, thread_ts, sender_id, message_text):
+    time.sleep(2)  # 等一下避免重複觸發
+
     messages = read_thread(channel_id, thread_ts)
+
     if should_reply(messages):
-        trigger_hdt(channel_id, thread_ts, sender_id, message_text)
+        call_perplexity_agent(channel_id, thread_ts, sender_id, message_text, messages)
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
-    # URL verification
     body = request.get_json()
+
+    # URL verification
     if body.get("type") == "url_verification":
         return jsonify({"challenge": body["challenge"]})
 
-    # 驗證簽名
-    # if not verify_slack_signature(request):
-    #     return jsonify({"error": "Invalid signature"}), 403
-
     event = body.get("event", {})
     event_type = event.get("type")
+    event_id = body.get("event_id", "")
 
-    # 只處理 app_mention
+    # 去重
+    if event_id in processed_events:
+        return jsonify({"ok": True})
+    processed_events.add(event_id)
+    if len(processed_events) > 1000:
+        processed_events.clear()
+
     if event_type == "app_mention":
         channel_id = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
         sender_id = event.get("user")
         message_text = event.get("text", "")
 
-        # 忽略 bot 訊息和 HDT 自己的訊息
+        # 忽略 bot 和 Halu 自己
         if event.get("bot_id") or sender_id == HALU_USER_ID:
             return jsonify({"ok": True})
 
-        # 非同步處理，立即回傳 200
         t = threading.Thread(
-            target=handle_event_async,
+            target=handle_mention,
             args=(event, channel_id, thread_ts, sender_id, message_text)
         )
         t.daemon = True
@@ -139,7 +156,7 @@ def slack_events():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "timestamp": time.time()})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
