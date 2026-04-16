@@ -109,9 +109,8 @@ def slack_events():
         thread_ts = event.get("thread_ts") or event.get("ts")
         message_text = event.get("text", "")
 
-        t = threading.Thread(target=handle_event, args=(channel_id, thread_ts, sender_id, message_text))
-        t.daemon = True
-        t.start()
+        # 直接在主 thread 處理，避免 background thread 被部署打斷
+        call_perplexity(channel_id, thread_ts, sender_id, message_text)
 
     return jsonify({"ok": True})
 
