@@ -98,8 +98,13 @@ HDT
 
     resp = requests.post("https://api.perplexity.ai/chat/completions", headers=headers, json=data)
     result = resp.json()
+    print(f"[DEBUG] Perplexity full response: {str(result)[:500]}")
 
-    reply_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+    choices = result.get("choices") or []
+    reply_text = ""
+    if choices:
+        msg = choices[0].get("message") or {}
+        reply_text = msg.get("content", "")
 
     if reply_text:
         print(f"[DEBUG] Sending reply to channel={channel_id} thread_ts={thread_ts}")
