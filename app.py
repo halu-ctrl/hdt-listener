@@ -119,9 +119,8 @@ def handle_mention(event, channel_id, thread_ts, sender_id, message_text):
     time.sleep(2)  # 等一下避免重複觸發
 
     messages = read_thread(channel_id, thread_ts)
-
-    if should_reply(messages):
-        call_perplexity_agent(channel_id, thread_ts, sender_id, message_text, messages)
+    print(f"[DEBUG] Thread has {len(messages)} messages, calling Perplexity directly")
+    call_perplexity_agent(channel_id, thread_ts, sender_id, message_text, messages)
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
