@@ -128,6 +128,9 @@ def slack_events():
     event_type = event.get("type")
     event_id = body.get("event_id", "")
 
+    # Debug log
+    print(f"[DEBUG] event_type={event_type} sender={event.get('user')} bot_id={event.get('bot_id')} text={event.get('text', '')[:50]}")
+
     # 去重
     if event_id in processed_events:
         return jsonify({"ok": True})
